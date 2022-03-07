@@ -399,7 +399,7 @@ export function createElement(type, config, children) {
 
   // Children can be more than one argument, and those are transferred onto
   // the newly allocated props object.
-  const childrenLength = arguments.length - 2;
+  const childrenLength = arguments.length - 2; // 从第三个参数开始算都是子节点参数
   if (childrenLength === 1) {
     props.children = children;
   } else if (childrenLength > 1) {
@@ -418,6 +418,7 @@ export function createElement(type, config, children) {
   // Resolve default props
   if (type && type.defaultProps) {
     const defaultProps = type.defaultProps;
+    // 要创建的节点类型中的默认配置会放到属性中
     for (propName in defaultProps) {
       if (props[propName] === undefined) {
         props[propName] = defaultProps[propName];

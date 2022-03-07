@@ -64,6 +64,7 @@ Component.prototype.setState = function(partialState, callback) {
     );
   }
 
+  // 看来setState并不会立即触发更新
   this.updater.enqueueSetState(this, partialState, callback, 'setState');
 };
 
