@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -8,6 +8,9 @@
  */
 
 import type {ReactContext, ReactProviderType} from 'shared/ReactTypes';
+import type {Fiber} from './ReactInternalTypes';
+
+import {enableLegacyHidden} from 'shared/ReactFeatureFlags';
 
 import {
   FunctionComponent,
@@ -16,6 +19,8 @@ import {
   HostRoot,
   HostPortal,
   HostComponent,
+  HostHoistable,
+  HostSingleton,
   HostText,
   Fragment,
   Mode,
@@ -74,6 +79,8 @@ export default function getComponentNameFromFiber(fiber: Fiber): string | null {
       return getWrappedName(type, type.render, 'ForwardRef');
     case Fragment:
       return 'Fragment';
+    case HostHoistable:
+    case HostSingleton:
     case HostComponent:
       // Host component type is the display name (e.g. "div", "View")
       return type;
@@ -86,8 +93,6 @@ export default function getComponentNameFromFiber(fiber: Fiber): string | null {
     case LazyComponent:
       // Name comes from the type in this case; we don't have a tag.
       return getComponentNameFromType(type);
-    case LegacyHiddenComponent:
-      return 'LegacyHidden';
     case Mode:
       if (type === REACT_STRICT_MODE_TYPE) {
         // Don't be less specific than shared/getComponentNameFromType
@@ -120,6 +125,10 @@ export default function getComponentNameFromFiber(fiber: Fiber): string | null {
         return type;
       }
       break;
+    case LegacyHiddenComponent:
+      if (enableLegacyHidden) {
+        return 'LegacyHidden';
+      }
   }
 
   return null;

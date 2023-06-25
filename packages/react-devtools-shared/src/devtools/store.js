@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -7,6 +7,7 @@
  * @flow
  */
 
+import {copy} from 'clipboard-js';
 import EventEmitter from '../events';
 import {inspect} from 'util';
 import {
@@ -23,7 +24,7 @@ import {
 import {ElementTypeRoot} from '../types';
 import {
   getSavedComponentFilters,
-  saveComponentFilters,
+  setSavedComponentFilters,
   separateDisplayNameAndHOCs,
   shallowDiffers,
   utfDecodeString,
@@ -44,8 +45,9 @@ import type {
   FrontendBridge,
   BridgeProtocol,
 } from 'react-devtools-shared/src/bridge';
+import UnsupportedBridgeOperationError from 'react-devtools-shared/src/UnsupportedBridgeOperationError';
 
-const debug = (methodName, ...args) => {
+const debug = (methodName: string, ...args: Array<string>) => {
   if (__DEBUG__) {
     console.log(
       `%cStore %c${methodName}`,
@@ -61,9 +63,9 @@ const LOCAL_STORAGE_COLLAPSE_ROOTS_BY_DEFAULT_KEY =
 const LOCAL_STORAGE_RECORD_CHANGE_DESCRIPTIONS_KEY =
   'React::DevTools::recordChangeDescriptions';
 
-type ErrorAndWarningTuples = Array<{|id: number, index: number|}>;
+type ErrorAndWarningTuples = Array<{id: number, index: number}>;
 
-type Config = {|
+type Config = {
   checkBridgeProtocolCompatibility?: boolean,
   isProfiling?: boolean,
   supportsNativeInspection?: boolean,
@@ -71,20 +73,21 @@ type Config = {|
   supportsReloadAndProfile?: boolean,
   supportsTimeline?: boolean,
   supportsTraceUpdates?: boolean,
-|};
+};
 
-export type Capabilities = {|
+export type Capabilities = {
   supportsBasicProfiling: boolean,
   hasOwnerMetadata: boolean,
   supportsStrictMode: boolean,
   supportsTimeline: boolean,
-|};
+};
 
 /**
  * The store is the single source of truth for updates from the backend.
  * ContextProviders can subscribe to the Store for specific things they want to provide.
  */
-export default class Store extends EventEmitter<{|
+export default class Store extends EventEmitter<{
+  backendVersion: [],
   collapseNodesByDefault: [],
   componentFilters: [],
   error: [Error],
@@ -97,7 +100,11 @@ export default class Store extends EventEmitter<{|
   supportsReloadAndProfile: [],
   unsupportedBridgeProtocolDetected: [],
   unsupportedRendererVersionDetected: [],
-|}> {
+}> {
+  // If the backend version is new enough to report its (NPM) version, this is it.
+  // This version may be displayed by the frontend for debugging purposes.
+  _backendVersion: string | null = null;
+
   _bridge: FrontendBridge;
 
   // Computed whenever _errorsAndWarnings Map changes.
@@ -111,10 +118,8 @@ export default class Store extends EventEmitter<{|
   _componentFilters: Array<ComponentFilter>;
 
   // Map of ID to number of recorded error and warning message IDs.
-  _errorsAndWarnings: Map<
-    number,
-    {|errorCount: number, warningCount: number|},
-  > = new Map();
+  _errorsAndWarnings: Map<number, {errorCount: number, warningCount: number}> =
+    new Map();
 
   // At least one of the injected renderers contains (DEV only) owner metadata.
   _hasOwnerMetadata: boolean = false;
@@ -164,7 +169,7 @@ export default class Store extends EventEmitter<{|
   // Renderer ID is needed to support inspection fiber props, state, and hooks.
   _rootIDToRendererID: Map<number, number> = new Map();
 
-  // These options may be initially set by a confiugraiton option when constructing the Store.
+  // These options may be initially set by a configuration option when constructing the Store.
   _supportsNativeInspection: boolean = true;
   _supportsProfiling: boolean = false;
   _supportsReloadAndProfile: boolean = false;
@@ -175,7 +180,8 @@ export default class Store extends EventEmitter<{|
   _rootSupportsBasicProfiling: boolean = false;
   _rootSupportsTimelineProfiling: boolean = false;
 
-  _unsupportedBridgeProtocol: BridgeProtocol | null = null;
+  _bridgeProtocol: BridgeProtocol | null = null;
+  _unsupportedBridgeProtocolDetected: boolean = false;
   _unsupportedRendererVersionDetected: boolean = false;
 
   // Total number of visible elements (within all roots).
@@ -264,6 +270,11 @@ export default class Store extends EventEmitter<{|
       bridge.addListener('bridgeProtocol', this.onBridgeProtocol);
       bridge.send('getBridgeProtocol');
     }
+
+    bridge.addListener('backendVersion', this.onBridgeBackendVersion);
+    bridge.send('getBackendVersion');
+
+    bridge.addListener('saveToClipboard', this.onSaveToClipboard);
   }
 
   // This is only used in tests to avoid memory leaks.
@@ -299,6 +310,10 @@ export default class Store extends EventEmitter<{|
         ),
       );
     }
+  }
+
+  get backendVersion(): string | null {
+    return this._backendVersion;
   }
 
   get collapseNodesByDefault(): boolean {
@@ -351,7 +366,7 @@ export default class Store extends EventEmitter<{|
     this._componentFilters = value;
 
     // Update persisted filter preferences stored in localStorage.
-    saveComponentFilters(value);
+    setSavedComponentFilters(value);
 
     // Notify the renderer that filter preferences have changed.
     // This is an expensive operation; it unmounts and remounts the entire tree,
@@ -361,6 +376,10 @@ export default class Store extends EventEmitter<{|
     }
 
     this.emit('componentFilters');
+  }
+
+  get bridgeProtocol(): BridgeProtocol | null {
+    return this._bridgeProtocol;
   }
 
   get errorCount(): number {
@@ -454,8 +473,8 @@ export default class Store extends EventEmitter<{|
     return this._supportsTraceUpdates;
   }
 
-  get unsupportedBridgeProtocol(): BridgeProtocol | null {
-    return this._unsupportedBridgeProtocol;
+  get unsupportedBridgeProtocolDetected(): boolean {
+    return this._unsupportedBridgeProtocolDetected;
   }
 
   get unsupportedRendererVersionDetected(): boolean {
@@ -467,7 +486,7 @@ export default class Store extends EventEmitter<{|
   }
 
   containsElement(id: number): boolean {
-    return this._idToElement.get(id) != null;
+    return this._idToElement.has(id);
   }
 
   getElementAtIndex(index: number): Element | null {
@@ -520,13 +539,13 @@ export default class Store extends EventEmitter<{|
   }
 
   getElementIDAtIndex(index: number): number | null {
-    const element: Element | null = this.getElementAtIndex(index);
+    const element = this.getElementAtIndex(index);
     return element === null ? null : element.id;
   }
 
   getElementByID(id: number): Element | null {
     const element = this._idToElement.get(id);
-    if (element == null) {
+    if (element === undefined) {
       console.warn(`No element found with id "${id}"`);
       return null;
     }
@@ -535,7 +554,7 @@ export default class Store extends EventEmitter<{|
   }
 
   // Returns a tuple of [id, index]
-  getElementsWithErrorsAndWarnings(): Array<{|id: number, index: number|}> {
+  getElementsWithErrorsAndWarnings(): Array<{id: number, index: number}> {
     if (this._cachedErrorAndWarningTuples !== null) {
       return this._cachedErrorAndWarningTuples;
     } else {
@@ -566,9 +585,10 @@ export default class Store extends EventEmitter<{|
     }
   }
 
-  getErrorAndWarningCountForElementID(
-    id: number,
-  ): {|errorCount: number, warningCount: number|} {
+  getErrorAndWarningCountForElementID(id: number): {
+    errorCount: number,
+    warningCount: number,
+  } {
     return this._errorsAndWarnings.get(id) || {errorCount: 0, warningCount: 0};
   }
 
@@ -587,7 +607,10 @@ export default class Store extends EventEmitter<{|
     let currentID = element.parentID;
     let index = 0;
     while (true) {
-      const current = ((this._idToElement.get(currentID): any): Element);
+      const current = this._idToElement.get(currentID);
+      if (current === undefined) {
+        return null;
+      }
 
       const {children} = current;
       for (let i = 0; i < children.length; i++) {
@@ -595,7 +618,12 @@ export default class Store extends EventEmitter<{|
         if (childID === previousID) {
           break;
         }
-        const child = ((this._idToElement.get(childID): any): Element);
+
+        const child = this._idToElement.get(childID);
+        if (child === undefined) {
+          return null;
+        }
+
         index += child.isCollapsed ? 1 : child.weight;
       }
 
@@ -617,7 +645,12 @@ export default class Store extends EventEmitter<{|
       if (rootID === currentID) {
         break;
       }
-      const root = ((this._idToElement.get(rootID): any): Element);
+
+      const root = this._idToElement.get(rootID);
+      if (root === undefined) {
+        return null;
+      }
+
       index += root.weight;
     }
 
@@ -625,9 +658,9 @@ export default class Store extends EventEmitter<{|
   }
 
   getOwnersListForElement(ownerID: number): Array<Element> {
-    const list = [];
+    const list: Array<Element> = [];
     const element = this._idToElement.get(ownerID);
-    if (element != null) {
+    if (element !== undefined) {
       list.push({
         ...element,
         depth: 0,
@@ -645,8 +678,8 @@ export default class Store extends EventEmitter<{|
         // Seems better to defer the cost, since the set of ids is probably pretty small.
         const sortedIDs = Array.from(unsortedIDs).sort(
           (idA, idB) =>
-            ((this.getIndexOfElementID(idA): any): number) -
-            ((this.getIndexOfElementID(idB): any): number),
+            (this.getIndexOfElementID(idA) || 0) -
+            (this.getIndexOfElementID(idB) || 0),
         );
 
         // Next we need to determine the appropriate depth for each element in the list.
@@ -657,18 +690,19 @@ export default class Store extends EventEmitter<{|
         // at which point, our depth is just the depth of that node plus one.
         sortedIDs.forEach(id => {
           const innerElement = this._idToElement.get(id);
-          if (innerElement != null) {
+          if (innerElement !== undefined) {
             let parentID = innerElement.parentID;
 
             let depth = 0;
             while (parentID > 0) {
               if (parentID === ownerID || unsortedIDs.has(parentID)) {
+                // $FlowFixMe[unsafe-addition] addition with possible null/undefined value
                 depth = depthMap.get(parentID) + 1;
                 depthMap.set(id, depth);
                 break;
               }
               const parent = this._idToElement.get(parentID);
-              if (parent == null) {
+              if (parent === undefined) {
                 break;
               }
               parentID = parent.parentID;
@@ -689,7 +723,7 @@ export default class Store extends EventEmitter<{|
 
   getRendererIDForElement(id: number): number | null {
     let current = this._idToElement.get(id);
-    while (current != null) {
+    while (current !== undefined) {
       if (current.parentID === 0) {
         const rendererID = this._rootIDToRendererID.get(current.id);
         return rendererID == null ? null : rendererID;
@@ -702,7 +736,7 @@ export default class Store extends EventEmitter<{|
 
   getRootIDForElement(id: number): number | null {
     let current = this._idToElement.get(id);
-    while (current != null) {
+    while (current !== undefined) {
       if (current.parentID === 0) {
         return current.id;
       } else {
@@ -744,10 +778,8 @@ export default class Store extends EventEmitter<{|
 
           const weightDelta = 1 - element.weight;
 
-          let parentElement = ((this._idToElement.get(
-            element.parentID,
-          ): any): Element);
-          while (parentElement != null) {
+          let parentElement = this._idToElement.get(element.parentID);
+          while (parentElement !== undefined) {
             // We don't need to break on a collapsed parent in the same way as the expand case below.
             // That's because collapsing a node doesn't "bubble" and affect its parents.
             parentElement.weight += weightDelta;
@@ -755,7 +787,7 @@ export default class Store extends EventEmitter<{|
           }
         }
       } else {
-        let currentElement = element;
+        let currentElement: ?Element = element;
         while (currentElement != null) {
           const oldWeight = currentElement.isCollapsed
             ? 1
@@ -770,10 +802,8 @@ export default class Store extends EventEmitter<{|
               : currentElement.weight;
             const weightDelta = newWeight - oldWeight;
 
-            let parentElement = ((this._idToElement.get(
-              currentElement.parentID,
-            ): any): Element);
-            while (parentElement != null) {
+            let parentElement = this._idToElement.get(currentElement.parentID);
+            while (parentElement !== undefined) {
               parentElement.weight += weightDelta;
               if (parentElement.isCollapsed) {
                 // It's important to break on a collapsed parent when expanding nodes.
@@ -809,10 +839,10 @@ export default class Store extends EventEmitter<{|
     }
   }
 
-  _adjustParentTreeWeight = (
-    parentElement: Element | null,
+  _adjustParentTreeWeight: (
+    parentElement: ?Element,
     weightDelta: number,
-  ) => {
+  ) => void = (parentElement, weightDelta) => {
     let isInsideCollapsedSubTree = false;
 
     while (parentElement != null) {
@@ -825,9 +855,7 @@ export default class Store extends EventEmitter<{|
         break;
       }
 
-      parentElement = ((this._idToElement.get(
-        parentElement.parentID,
-      ): any): Element);
+      parentElement = this._idToElement.get(parentElement.parentID);
     }
 
     // Additions and deletions within a collapsed subtree should not affect the overall number of elements.
@@ -850,20 +878,17 @@ export default class Store extends EventEmitter<{|
     }
   }
 
-  onBridgeNativeStyleEditorSupported = ({
-    isSupported,
-    validAttributes,
-  }: {|
+  onBridgeNativeStyleEditorSupported: ({
     isSupported: boolean,
     validAttributes: ?$ReadOnlyArray<string>,
-  |}) => {
+  }) => void = ({isSupported, validAttributes}) => {
     this._isNativeStyleEditorSupported = isSupported;
     this._nativeStyleEditorValidAttributes = validAttributes || null;
 
     this.emit('supportsNativeStyleEditor');
   };
 
-  onBridgeOperations = (operations: Array<number>) => {
+  onBridgeOperations: (operations: Array<number>) => void = operations => {
     if (__DEBUG__) {
       console.groupCollapsed('onBridgeOperations');
       debug('onBridgeOperations', operations.join(','));
@@ -883,16 +908,19 @@ export default class Store extends EventEmitter<{|
     let i = 2;
 
     // Reassemble the string table.
-    const stringTable = [
+    const stringTable: Array<string | null> = [
       null, // ID = 0 corresponds to the null string.
     ];
-    const stringTableSize = operations[i++];
+    const stringTableSize = operations[i];
+    i++;
+
     const stringTableEnd = i + stringTableSize;
+
     while (i < stringTableEnd) {
-      const nextLength = operations[i++];
-      const nextString = utfDecodeString(
-        (operations.slice(i, i + nextLength): any),
-      );
+      const nextLength = operations[i];
+      i++;
+
+      const nextString = utfDecodeString(operations.slice(i, i + nextLength));
       stringTable.push(nextString);
       i += nextLength;
     }
@@ -901,7 +929,7 @@ export default class Store extends EventEmitter<{|
       const operation = operations[i];
       switch (operation) {
         case TREE_OPERATION_ADD: {
-          const id = ((operations[i + 1]: any): number);
+          const id = operations[i + 1];
           const type = ((operations[i + 2]: any): ElementType);
 
           i += 3;
@@ -914,8 +942,6 @@ export default class Store extends EventEmitter<{|
             );
           }
 
-          let ownerID: number = 0;
-          let parentID: number = ((null: any): number);
           if (type === ElementTypeRoot) {
             if (__DEBUG__) {
               debug('Add', `new root node ${id}`);
@@ -930,11 +956,21 @@ export default class Store extends EventEmitter<{|
               (operations[i] & PROFILING_FLAG_TIMELINE_SUPPORT) !== 0;
             i++;
 
-            const supportsStrictMode = operations[i] > 0;
-            i++;
+            let supportsStrictMode = false;
+            let hasOwnerMetadata = false;
 
-            const hasOwnerMetadata = operations[i] > 0;
-            i++;
+            // If we don't know the bridge protocol, guess that we're dealing with the latest.
+            // If we do know it, we can take it into consideration when parsing operations.
+            if (
+              this._bridgeProtocol === null ||
+              this._bridgeProtocol.version >= 2
+            ) {
+              supportsStrictMode = operations[i] > 0;
+              i++;
+
+              hasOwnerMetadata = operations[i] > 0;
+              i++;
+            }
 
             this._roots = this._roots.concat(id);
             this._rootIDToRendererID.set(id, rendererID);
@@ -967,10 +1003,10 @@ export default class Store extends EventEmitter<{|
 
             haveRootsChanged = true;
           } else {
-            parentID = ((operations[i]: any): number);
+            const parentID = operations[i];
             i++;
 
-            ownerID = ((operations[i]: any): number);
+            const ownerID = operations[i];
             i++;
 
             const displayNameStringID = operations[i];
@@ -988,23 +1024,21 @@ export default class Store extends EventEmitter<{|
               );
             }
 
-            if (!this._idToElement.has(parentID)) {
+            const parentElement = this._idToElement.get(parentID);
+            if (parentElement === undefined) {
               this._throwAndEmitError(
                 Error(
                   `Cannot add child "${id}" to parent "${parentID}" because parent node was not found in the Store.`,
                 ),
               );
+
+              continue;
             }
 
-            const parentElement = ((this._idToElement.get(
-              parentID,
-            ): any): Element);
             parentElement.children.push(id);
 
-            const [
-              displayNameWithoutHOCs,
-              hocDisplayNames,
-            ] = separateDisplayNameAndHOCs(displayName, type);
+            const [displayNameWithoutHOCs, hocDisplayNames] =
+              separateDisplayNameAndHOCs(displayName, type);
 
             const element: Element = {
               children: [],
@@ -1037,23 +1071,25 @@ export default class Store extends EventEmitter<{|
           break;
         }
         case TREE_OPERATION_REMOVE: {
-          const removeLength = ((operations[i + 1]: any): number);
+          const removeLength = operations[i + 1];
           i += 2;
 
           for (let removeIndex = 0; removeIndex < removeLength; removeIndex++) {
-            const id = ((operations[i]: any): number);
+            const id = operations[i];
+            const element = this._idToElement.get(id);
 
-            if (!this._idToElement.has(id)) {
+            if (element === undefined) {
               this._throwAndEmitError(
                 Error(
                   `Cannot remove node "${id}" because no matching node was found in the Store.`,
                 ),
               );
+
+              continue;
             }
 
             i += 1;
 
-            const element = ((this._idToElement.get(id): any): Element);
             const {children, ownerID, parentID, weight} = element;
             if (children.length > 0) {
               this._throwAndEmitError(
@@ -1063,7 +1099,7 @@ export default class Store extends EventEmitter<{|
 
             this._idToElement.delete(id);
 
-            let parentElement = null;
+            let parentElement: ?Element = null;
             if (parentID === 0) {
               if (__DEBUG__) {
                 debug('Remove', `node ${id} root`);
@@ -1078,14 +1114,18 @@ export default class Store extends EventEmitter<{|
               if (__DEBUG__) {
                 debug('Remove', `node ${id} from parent ${parentID}`);
               }
-              parentElement = ((this._idToElement.get(parentID): any): Element);
+
+              parentElement = this._idToElement.get(parentID);
               if (parentElement === undefined) {
                 this._throwAndEmitError(
                   Error(
                     `Cannot remove node "${id}" from parent "${parentID}" because no matching node was found in the Store.`,
                   ),
                 );
+
+                continue;
               }
+
               const index = parentElement.children.indexOf(id);
               parentElement.children.splice(index, 1);
             }
@@ -1118,7 +1158,7 @@ export default class Store extends EventEmitter<{|
             debug(`Remove root ${id}`);
           }
 
-          const recursivelyDeleteElements = elementID => {
+          const recursivelyDeleteElements = (elementID: number) => {
             const element = this._idToElement.get(elementID);
             this._idToElement.delete(elementID);
             if (element) {
@@ -1139,19 +1179,21 @@ export default class Store extends EventEmitter<{|
           break;
         }
         case TREE_OPERATION_REORDER_CHILDREN: {
-          const id = ((operations[i + 1]: any): number);
-          const numChildren = ((operations[i + 2]: any): number);
+          const id = operations[i + 1];
+          const numChildren = operations[i + 2];
           i += 3;
 
-          if (!this._idToElement.has(id)) {
+          const element = this._idToElement.get(id);
+          if (element === undefined) {
             this._throwAndEmitError(
               Error(
                 `Cannot reorder children for node "${id}" because no matching node was found in the Store.`,
               ),
             );
+
+            continue;
           }
 
-          const element = ((this._idToElement.get(id): any): Element);
           const children = element.children;
           if (children.length !== numChildren) {
             this._throwAndEmitError(
@@ -1225,7 +1267,9 @@ export default class Store extends EventEmitter<{|
           break;
         default:
           this._throwAndEmitError(
-            Error(`Unsupported Bridge operation "${operation}"`),
+            new UnsupportedBridgeOperationError(
+              `Unsupported Bridge operation "${operation}"`,
+            ),
           );
       }
     }
@@ -1250,8 +1294,8 @@ export default class Store extends EventEmitter<{|
 
     if (haveRootsChanged) {
       const prevRootSupportsProfiling = this._rootSupportsBasicProfiling;
-      const prevRootSupportsTimelineProfiling = this
-        ._rootSupportsTimelineProfiling;
+      const prevRootSupportsTimelineProfiling =
+        this._rootSupportsTimelineProfiling;
 
       this._hasOwnerMetadata = false;
       this._rootSupportsBasicProfiling = false;
@@ -1297,15 +1341,15 @@ export default class Store extends EventEmitter<{|
   // this message enables the backend to override the frontend's current ("saved") filters.
   // This action should also override the saved filters too,
   // else reloading the frontend without reloading the backend would leave things out of sync.
-  onBridgeOverrideComponentFilters = (
+  onBridgeOverrideComponentFilters: (
     componentFilters: Array<ComponentFilter>,
-  ) => {
+  ) => void = componentFilters => {
     this._componentFilters = componentFilters;
 
-    saveComponentFilters(componentFilters);
+    setSavedComponentFilters(componentFilters);
   };
 
-  onBridgeShutdown = () => {
+  onBridgeShutdown: () => void = () => {
     if (__DEBUG__) {
       debug('onBridgeShutdown', 'unsubscribing from Bridge');
     }
@@ -1333,7 +1377,9 @@ export default class Store extends EventEmitter<{|
       'unsupportedRendererVersion',
       this.onBridgeUnsupportedRendererVersion,
     );
+    bridge.removeListener('backendVersion', this.onBridgeBackendVersion);
     bridge.removeListener('bridgeProtocol', this.onBridgeProtocol);
+    bridge.removeListener('saveToClipboard', this.onSaveToClipboard);
 
     if (this._onBridgeProtocolTimeoutID !== null) {
       clearTimeout(this._onBridgeProtocolTimeoutID);
@@ -1341,48 +1387,61 @@ export default class Store extends EventEmitter<{|
     }
   };
 
-  onBackendStorageAPISupported = (isBackendStorageAPISupported: boolean) => {
+  onBackendStorageAPISupported: (
+    isBackendStorageAPISupported: boolean,
+  ) => void = isBackendStorageAPISupported => {
     this._isBackendStorageAPISupported = isBackendStorageAPISupported;
 
     this.emit('supportsReloadAndProfile');
   };
 
-  onBridgeSynchronousXHRSupported = (isSynchronousXHRSupported: boolean) => {
+  onBridgeSynchronousXHRSupported: (
+    isSynchronousXHRSupported: boolean,
+  ) => void = isSynchronousXHRSupported => {
     this._isSynchronousXHRSupported = isSynchronousXHRSupported;
 
     this.emit('supportsReloadAndProfile');
   };
 
-  onBridgeUnsupportedRendererVersion = () => {
+  onBridgeUnsupportedRendererVersion: () => void = () => {
     this._unsupportedRendererVersionDetected = true;
 
     this.emit('unsupportedRendererVersionDetected');
   };
 
-  onBridgeProtocol = (bridgeProtocol: BridgeProtocol) => {
-    if (this._onBridgeProtocolTimeoutID !== null) {
-      clearTimeout(this._onBridgeProtocolTimeoutID);
-      this._onBridgeProtocolTimeoutID = null;
-    }
-
-    if (bridgeProtocol.version !== currentBridgeProtocol.version) {
-      this._unsupportedBridgeProtocol = bridgeProtocol;
-    } else {
-      // If we should happen to get a response after timing out...
-      this._unsupportedBridgeProtocol = null;
-    }
-
-    this.emit('unsupportedBridgeProtocolDetected');
+  onBridgeBackendVersion: (backendVersion: string) => void = backendVersion => {
+    this._backendVersion = backendVersion;
+    this.emit('backendVersion');
   };
 
-  onBridgeProtocolTimeout = () => {
+  onBridgeProtocol: (bridgeProtocol: BridgeProtocol) => void =
+    bridgeProtocol => {
+      if (this._onBridgeProtocolTimeoutID !== null) {
+        clearTimeout(this._onBridgeProtocolTimeoutID);
+        this._onBridgeProtocolTimeoutID = null;
+      }
+
+      this._bridgeProtocol = bridgeProtocol;
+
+      if (bridgeProtocol.version !== currentBridgeProtocol.version) {
+        // Technically newer versions of the frontend can, at least for now,
+        // gracefully handle older versions of the backend protocol.
+        // So for now we don't need to display the unsupported dialog.
+      }
+    };
+
+  onBridgeProtocolTimeout: () => void = () => {
     this._onBridgeProtocolTimeoutID = null;
 
     // If we timed out, that indicates the backend predates the bridge protocol,
     // so we can set a fake version (0) to trigger the downgrade message.
-    this._unsupportedBridgeProtocol = BRIDGE_PROTOCOL[0];
+    this._bridgeProtocol = BRIDGE_PROTOCOL[0];
 
     this.emit('unsupportedBridgeProtocolDetected');
+  };
+
+  onSaveToClipboard: (text: string) => void = text => {
+    copy(text);
   };
 
   // The Store should never throw an Error without also emitting an event.
@@ -1390,7 +1449,7 @@ export default class Store extends EventEmitter<{|
   // but the downstream errors they cause will be reported as bugs.
   // For example, https://github.com/facebook/react/issues/21402
   // Emitting an error event allows the ErrorBoundary to show the original error.
-  _throwAndEmitError(error: Error) {
+  _throwAndEmitError(error: Error): empty {
     this.emit('error', error);
 
     // Throwing is still valuable for local development

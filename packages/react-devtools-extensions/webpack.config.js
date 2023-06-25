@@ -1,7 +1,7 @@
 'use strict';
 
 const {resolve} = require('path');
-const {DefinePlugin} = require('webpack');
+const Webpack = require('webpack');
 const {
   DARK_MODE_DIMMED_WARNING_COLOR,
   DARK_MODE_DIMMED_ERROR_COLOR,
@@ -48,14 +48,16 @@ const babelOptions = {
 
 module.exports = {
   mode: __DEV__ ? 'development' : 'production',
-  devtool: __DEV__ ? 'cheap-module-eval-source-map' : false,
+  devtool: __DEV__ ? 'cheap-module-source-map' : false,
   entry: {
     background: './src/background.js',
-    contentScript: './src/contentScript.js',
-    injectGlobalHook: './src/injectGlobalHook.js',
+    backendManager: './src/backendManager.js',
     main: './src/main.js',
     panel: './src/panel.js',
-    renderer: './src/renderer.js',
+    proxy: './src/contentScripts/proxy.js',
+    prepareInjection: './src/contentScripts/prepareInjection.js',
+    renderer: './src/contentScripts/renderer.js',
+    installHook: './src/contentScripts/installHook.js',
   },
   output: {
     path: __dirname + '/build',
@@ -64,18 +66,14 @@ module.exports = {
     chunkFilename: '[name].chunk.js',
   },
   node: {
-    // Don't define a polyfill on window.setImmediate
-    setImmediate: false,
-
-    // source-maps package has a dependency on 'fs'
-    // but this build won't trigger that code path
-    fs: 'empty',
+    global: false,
   },
   resolve: {
     alias: {
       react: resolve(builtModulesDir, 'react'),
       'react-debug-tools': resolve(builtModulesDir, 'react-debug-tools'),
       'react-devtools-feature-flags': resolveFeatureFlags(featureFlagTarget),
+      'react-dom/client': resolve(builtModulesDir, 'react-dom/client'),
       'react-dom': resolve(builtModulesDir, 'react-dom'),
       'react-is': resolve(builtModulesDir, 'react-is'),
       scheduler: resolve(builtModulesDir, 'scheduler'),
@@ -85,7 +83,11 @@ module.exports = {
     minimize: false,
   },
   plugins: [
-    new DefinePlugin({
+    new Webpack.ProvidePlugin({
+      process: 'process/browser',
+      Buffer: ['buffer', 'Buffer'],
+    }),
+    new Webpack.DefinePlugin({
       __DEV__,
       __EXPERIMENTAL__: true,
       __EXTENSION__: true,
